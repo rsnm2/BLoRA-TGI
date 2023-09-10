@@ -30,12 +30,8 @@ class BLoraCausalLMBatch:
     max_input_length: int
     padding_right_offset: int
 
-    # past metadata
-    keys_head_dim_last: bool = True
-
     def p(self):
         for key in self.__dict__:
-
             if key == "past_key_values" and self.past_key_values is None:
                 val = "None"
             elif key == "past_key_values" and self.past_key_values is not None:
@@ -129,7 +125,6 @@ class BLoraCausalLMBatch:
     #       note:   we need to remove padding in cases where the item filtered
     #               was bounding the kv cache sizes / attention mask sizes
     # 3) set new batch state
-
     def filter(self, request_ids: List[int]) -> Optional["BLoraCausalLMBatch"]:
         if len(request_ids) == 0:
             raise ValueError("Batch must have at least one request")
@@ -244,21 +239,19 @@ class BLoraCausalLMBatch:
         if type(self.past_key_values[0]) == tuple:
             self.past_key_values = [list(layer) for layer in self.past_key_values]
 
+            if len(self.past_key_values[0][0].shape) != 4:
+                raise NotImplementedError("Only supporting models with past_key_values shape == 4 - i.e. not BLOOM")
+        else:
+            raise ValueError("Currently only supporting tuple types for past_key_values")
+
         # new kv_length is just the longest remaining input - 1
         past_kv_length = new_max_input_length - 1
-        
+
         # filter each layer
         for layer in self.past_key_values:
             past_keys, past_values = layer
-            if len(past_keys.shape) == 3:
-                print("\n\n\n\n ------------ PAST KV SHAPE IS 3 ------------ \n\n\n\n")
-                # Force past to be of dim [self_size, num_heads, ...] for easy indexing
-                past_keys = past_keys.view(len(self), -1, *past_keys.shape[-2:])
-                past_values = past_values.view(len(self), -1, *past_values.shape[-2:])
-            if self.keys_head_dim_last:
-                layer[0] = past_keys[keep_indices, :, -past_kv_length:, :]
-            else:
-                layer[0] = past_keys[keep_indices, :, :, -past_kv_length:]
+
+            layer[0] = past_keys[keep_indices, :, -past_kv_length:, :]
             del past_keys
             layer[1] = past_values[keep_indices, :, -past_kv_length:, :]
             del past_values    
@@ -288,47 +281,167 @@ class BLoraCausalLMBatch:
 
         return self
 
-#     # combine two batches into one
-#     @classmethod
-#     def concatenate(cls, batches: List["DeepSparseCausalLMBatch"]) -> "DeepSparseCausalLMBatch":
-#         assert len(batches) > 1, "must have more than 1 batch to concatenate"
+    @classmethod
+    def concatenate(cls, batches: List["BLoraCausalLMBatch"]) -> "BLoraCausalLMBatch":
+        if len(batches) <= 1:
+            raise ValueError(f"len(batches) = {len(batches): Must pass more than 1 batch to concatenate}")
 
-#         requests_idx_mapping    = {}
-#         requests                = []
-#         input_ids_list          = []
-#         past_key_values_list    = []
-#         stopping_criteria_list  = []
-#         next_token_chooser_list = []
+        # compute new padding metadata
+        total_batch_size = 0
+        max_input_length = 0
+        padding_right_offset = 0
 
-#         start_index = 0
-#         for i, batch in enumerate(batches):
-#             assert batch.past_key_values_list is not None, "only concatenate prefilled batches"
+        for batch in batches:
+            total_batch_size += len(batch)
+            max_input_length = max(max_input_length, batch.max_input_length)
+            padding_right_offset = max(padding_right_offset, batch.padding_right_offset)
+
+        # metadata
+        requests = []
+        requests_idx_mapping = {}
+        lora_ids = []
+
+        # model inputs
+        input_ids = None
+        attention_mask = None
+        position_ids = None
+        past_key_values = []
+
+        # generation helpers
+        stopping_criterias = []
+        
+        # padding metadata
+        input_lengths = []
+        
+        start_index = 0
+        for i, batch in enumerate(batches):
+            end_index = start_index + len(batch)
+
+            # combine all lists
+            requests.extend(batch.requests)
+            lora_ids.extend(batch.lora_ids)
+            stopping_criterias.extend(batch.stopping_criterias)
+            input_lengths.extend(batch.input_lengths)        
             
-#             # concatenate request, input_ids, and past_key_values lists
-#             requests.extend(batch.requests)
-#             input_ids_list.extend(batch.input_ids_list)
-#             past_key_values_list.extend(batch.past_key_values_list)
-#             stopping_criteria_list.extend(batch.stopping_criteria_list)
-#             next_token_chooser_list.extend(batch.next_token_chooser_list)
-
-#             # merge the request_id to index mapping
-#             if i == 0:
-#                 requests_idx_mapping = batch.requests_idx_mapping
-#             else:
-#                 for k, v in batch.requests_idx_mapping.items():
-#                     requests_idx_mapping[k] = v + start_index
+            # update {request_id: list_idx} mapping
+            for r_id, l_idx in batch.requests_idx_mapping.items():
+                requests_idx_mapping[r_id] = l_idx + start_index
             
-#             start_index += len(batch)
+            # update model inputs
+            if batch.past_key_values is None:
+                raise ValueError("Only concatenate prefilled batches")
+            
+            # a) input_ids 
+            # b) position_ids
+            #       always of shape [batch_size, 1], no padding needed
+            if input_ids is None or position_ids is None:
+                assert input_ids is None and position_ids is None
+                input_ids = batch.input_ids.new_empty((total_batch_size, 1))
+                position_ids = batch.position_ids.new_empty((total_batch_size, 1))
 
-#         return cls(
-#             batch_id=batches[0].batch_id,
-#             requests=requests,
-#             requests_idx_mapping=requests_idx_mapping,
-#             input_ids_list=input_ids_list,
-#             past_key_values_list=past_key_values_list,
-#             stopping_criteria_list=stopping_criteria_list,
-#             next_token_chooser_list=next_token_chooser_list
-#         )
+            input_ids[start_index:end_index] = batch.input_ids
+            position_ids[start_index:end_index] = batch.position_ids
+            
+            # c) attention_mask 
+            #       padded to [b, max_possible_tokens] == [b, max_input_len, padding_right_offset]
+            #
+            #       handle cases like the following concat(b1,b2)
+            #           b1=
+            #           [0,0,1,1,0]
+            #           [1,1,1,1,0]
+            #
+            #           b2=
+            #           [1,1,0,0]
+            #           [0,1,0,0]
+            #
+            #           new_attn_mask=
+            #           [0,0,1,1,0,0] << inserted old_idx 0-5 to new_idx 0-5
+            #           [1,1,1,1,0,0] << inserted old_idx 0-5 to new_idx 0-5
+            #           [0,0,1,1,0,0] << inserted old_idx 0-4 to new_idx 2-6
+            #           [0,0,0,1,0,0] << inserted old_idx 0-4 to new_idx 2-6 --> new_idx left offset == max_input_len - b2.max_input_lenght
+            
+            if attention_mask is None:
+                attention_mask = batch.attention_mask.new_zeros((total_batch_size, max_input_length + padding_right_offset),)
+            
+            left_offset = max_input_length - batch.max_input_length
+            assert batch.attention_mask.shape[1] - batch.max_input_length - batch.padding_right_offset == 0
+            assert batch.attention_mask.shape[1] - batch.padding_right_offset == attention_mask.shape[1] - padding_right_offset - left_offset
+            attention_mask[
+                start_index:end_index,
+                left_offset:-padding_right_offset
+            ] = batch.attention_mask[
+                :, 
+                :-batch.padding_right_offset
+            ]
+            
+            # d) past_key_values
+            #       concat logic outside for loop (below)
+            #       ensure update happens in place (tuples are immutable), for incremental garbage collection 
+            if type(batch.past_key_values[0]) == tuple:
+                batch.past_key_values = [list(layer) for layer in batch.past_key_values]
+                if len(batch.past_key_values[0][0].shape) != 4:
+                    raise NotImplementedError("Only supporting models with past_key_values shape == 4 - i.e. not BLOOM")
+            else:
+                # TODO: I think this might be okay
+                raise ValueError("Currently only supporting tuple types for past_key_values")
+
+            start_index = end_index    
+        
+        # d) past_key_values
+        first_past_key_values = batches[0].past_key_values
+        _, num_heads, _, head_dim = first_past_key_values[0][1].shape        
+        padded_past_shape = (total_batch_size, num_heads, max_input_length - 1, head_dim)
+
+        # concatenate past kvs layer by layer to allow incremental garbage collection
+        for j in range(len(first_past_key_values)):
+            
+            # kv buffers with the new shapes (w/ fill batch size)
+            padded_past_keys = first_past_key_values[j][0].new_zeros(padded_past_shape)
+            padded_past_values = first_past_key_values[j][1].new_zeros(padded_past_shape)
+            
+            # fill the buffers with the kvs from each batch
+            start_index = 0
+            for batch in batches:
+                end_index = start_index + len(batch)
+
+                # extract past kvs, clearing references for gc
+                past_keys, past_values = batch.past_key_values[j]
+                batch.past_key_values[j][0] = None 
+                batch.past_key_values[j][1] = None 
+
+                # copy into the buffer, padding to the left
+                past_seq_len = batch.max_input_length - 1
+                assert past_seq_len == past_keys.shape[2] and past_seq_len == past_values.shape[2]
+                padded_past_keys[
+                    start_index:end_index, :, -past_seq_len:, :
+                ] = past_keys
+                
+                padded_past_values[
+                    start_index:end_index,:, -past_seq_len:, :
+                ] = past_values
+                
+                # free gpu memory
+                del past_keys
+                del past_values
+
+                start_index = end_index
+
+            past_key_values.append([padded_past_keys, padded_past_values])
+
+        return cls(
+            batch_id=batches[0].batch_id,
+            requests=requests,
+            requests_idx_mapping=requests_idx_mapping,
+            lora_ids=lora_ids,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            stopping_criterias=stopping_criterias,
+            input_lengths=input_lengths,
+            max_input_length=max_input_length,
+            padding_right_offset=padding_right_offset
+        )
 
 class BLoraCausalLM:
     def __init__(
@@ -340,20 +453,15 @@ class BLoraCausalLM:
     ):
         self.active_batch_id = None
         
-        # load model
         self.model = AutoModelForCausalLM.from_pretrained(
             base_model_id,
             device_map="auto", 
             torch_dtype=dtype
         )
 
-        # load loras
         self.model, self.lora_map = load_loras(self.model, lora_ids)
-
-        # check if model takes position ids
         self.has_position_ids = has_position_ids
 
-        # setup tokenizer
         # self.tokenizer = AutoTokenizer.from_pretrained(base_model_id)
         self.tokenizer = LlamaTokenizer.from_pretrained(base_model_id)
         self.tokenizer.padding_side = "left"
@@ -369,12 +477,20 @@ class BLoraCausalLM:
         self,
         batch_id: int,
         batch_lora_ids: List[str],
+        is_prefill: bool = False
     ):  
-        # if current batch is not already active, set lora ids
-        if self.active_batch_id is None or self.active_batch_id != batch_id:
-            self.active_batch_id = batch_id
+        # if prefill --> then the lora_ids need to be reset
+        #       note: if prefill, leave active_batch as none
+        #             prefills are followed by concatenate, which will invalidate
+        
+        if (is_prefill or 
+            self.active_batch_id is None or 
+            self.active_batch_id != batch_id
+        ):
+            # set active_batch_id so we do not need to call this again
+            self.active_batch_id = batch_id if not is_prefill else None
 
-            # TODO - figure out if this take a long time and make it faster
+            # TODO (@rsnm2): figure out if this take a long time and make it faster
             inp_loras = [self.lora_map[lora_id] for lora_id in batch_lora_ids]
             for _, module in self.model.named_modules():
                 module.batch_lora_ids = inp_loras
@@ -414,7 +530,11 @@ class BLoraCausalLM:
     ) -> (List[Generation], Optional[BLoraCausalLMBatch]):
         
         # set loras to match the current batch
-        self.set_batch_lora_ids(batch.batch_id, batch.lora_ids)
+        self.set_batch_lora_ids(
+            batch_id=batch.batch_id, 
+            batch_lora_ids=batch.lora_ids, 
+            is_prefill=batch.past_key_values is None
+        )
 
         # run forward pass, filtering the attn mask
         offset = -batch.padding_right_offset if batch.padding_right_offset > 0 else batch.attention_mask.shape[1]
@@ -424,7 +544,6 @@ class BLoraCausalLM:
             batch.position_ids,
             batch.past_key_values,
         )
-
         generations: List[Generation] = []
         all_stopped = True
 
