@@ -1,30 +1,27 @@
 from queue import Queue
 from typing import List, Dict, Optional, Tuple
-from service.service import DeepSparseService
-from service.causal_lm import DeepSparseCausalLM
+from service.service import TextGenerationService
 from utils import CachedBatch, Batch, Generation, GenerateRequest, Request, GenerationParameters
 
-class DeepSparseRouter:
+class TextGenerationRouter:
     def __init__(
         self, 
-        service: Optional[DeepSparseService] = None,
-        model_path: Optional[str] = None,
-        tokenizer_path: Optional[str] = None
+        service: Optional[TextGenerationService] = None,
+        base_model_id: Optional[str] = None,
+        lora_ids: List[str] = []
     ):        
-        assert service is not None or (model_path is not None and tokenizer_path is not None)
+        assert service is not None or (base_model_id is not None and len(lora_ids) == 0)
 
         if service is not None:
             self.service = service
         else:
-            self.service = DeepSparseService(
-                model = DeepSparseCausalLM(
-                    model_path=model_path,
-                    tokenizer_path=tokenizer_path
-                )
+            self.service = TextGenerationService(
+                base_model_id=base_model_id,
+                lora_ids=lora_ids,
             )
 
-        self.queue: DeepSparseQueue = DeepSparseQueue()
-        self.batching_task_should_stop:bool = False
+        self.queue: RequestQueue = RequestQueue()
+        self.batching_task_should_stop: bool = False
 
     def submit_request(self, generate_request: GenerateRequest):
         self.queue.append(generate_request)
@@ -101,7 +98,7 @@ class DeepSparseRouter:
 
 
 # TODO: update to do more sophisticated logic as to when to do a prefill
-def batching_task(router: DeepSparseRouter):
+def batching_task(router: TextGenerationRouter):
     # while not signaled to stop
     while not router.batching_task_should_stop:
         
@@ -145,7 +142,7 @@ def batching_task(router: DeepSparseRouter):
             next_batch = router.queue.next_batch(block=False)
 
 # TODO: implement logic for maximum size of the queue based on memory usage
-class DeepSparseQueue:
+class RequestQueue:
     def __init__(self):
         self.next_request_id: int = 0
         self.next_batch_id: int = 0

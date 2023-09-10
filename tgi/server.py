@@ -2,29 +2,33 @@ import fastapi, uvicorn
 from contextlib import asynccontextmanager
 
 from threading import Thread
-from queue import Queue
-from typing import Optional
-
-from router import DeepSparseRouter, batching_task
+from router import TextGenerationRouter, batching_task
 from utils import GenerateRequestInputs, GenerateRequestOutputs, GenerateRequest
 
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("--deployment-dir", type=str)
+parser.add_argument("--base-model-id", type=str, required=True)
+parser.add_argument("--lora-ids", nargs='+', type=str, required=True)
 
 args = parser.parse_args()
-deployment_dir = args.deployment_dir
-model_path = deployment_dir + "/model.onnx"
+base_model_id = args.base_model_id
+lora_ids = args.lora_ids
 
 artifacts = {}
 
 @asynccontextmanager
 async def lifespan(app: fastapi.FastAPI):
     print("\n--------------------       Building Router               --------------------\n")
-    artifacts["router"] = DeepSparseRouter(model_path=model_path, tokenizer_path=deployment_dir)
+    artifacts["router"] = TextGenerationRouter(
+        base_model_id=base_model_id, 
+        lora_ids=lora_ids
+    )
 
     print("\n--------------------       Starting Batching Task        --------------------\n")
-    batching_thread = Thread(target=batching_task, args=[artifacts["router"]])
+    batching_thread = Thread(
+        target=batching_task,
+        args=[artifacts["router"]]
+    )
     batching_thread.start()
 
     print("\n--------------------       Launching App                 --------------------\n")

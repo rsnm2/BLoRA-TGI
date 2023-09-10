@@ -239,11 +239,9 @@ class BLoraCausalLMBatch:
         if type(self.past_key_values[0]) == tuple:
             self.past_key_values = [list(layer) for layer in self.past_key_values]
 
-            if len(self.past_key_values[0][0].shape) != 4:
-                raise NotImplementedError("Only supporting models with past_key_values shape == 4 - i.e. not BLOOM")
-        else:
-            raise ValueError("Currently only supporting tuple types for past_key_values")
-
+        if len(self.past_key_values[0][0].shape) != 4:
+            raise NotImplementedError("Only supporting models with past_key_values shape == 4 - i.e. not BLOOM")
+        
         # new kv_length is just the longest remaining input - 1
         past_kv_length = new_max_input_length - 1
 
@@ -412,6 +410,7 @@ class BLoraCausalLMBatch:
                 # copy into the buffer, padding to the left
                 past_seq_len = batch.max_input_length - 1
                 assert past_seq_len == past_keys.shape[2] and past_seq_len == past_values.shape[2]
+                
                 padded_past_keys[
                     start_index:end_index, :, -past_seq_len:, :
                 ] = past_keys
