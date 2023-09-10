@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field
 from queue import Queue
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from logits_process import (RepetitionPenaltyLogitsProcessor, LogitsWarpers, softmax)
 
 # TODO: sample for b > 1 with vectorized code
@@ -74,33 +74,43 @@ class FinishReason(Enum):
 
 class StoppingCriteria:
     def __init__(
-        self, 
-        eos_token_id: int,
-        max_new_tokens: int,
-    ):        
-        assert max_new_tokens > 0
-        self.max_new_tokens = max_new_tokens
+        self,
+        eos_token_id: int,    
+        max_new_tokens: int = 20,
+        ignore_eos_token: bool = False,
+    ):
         self.eos_token_id = eos_token_id
+        self.max_new_tokens = max_new_tokens
         self.current_tokens = 0
+        self.ignore_eos_token = ignore_eos_token
 
-    def __call__(self, generated_token_id:int):
+    def __str__(self):
+        return f"[StoppingCriteria.max_new_tokens: {self.max_new_tokens}]"
+
+    def __repr__(self):
+        return f"[StoppingCriteria.max_new_tokens: {self.max_new_tokens}]"
+    
+    def __call__(self, token_id: int) -> Tuple[bool, Optional[str]]:
         self.current_tokens += 1
         if self.current_tokens >= self.max_new_tokens:
             return True, FinishReason.FINISH_REASON_LENGTH
-        
-        if generated_token_id == self.eos_token_id:
+
+        if not self.ignore_eos_token and token_id == self.eos_token_id:
             return True, FinishReason.FINISH_REASON_EOS_TOKEN
-        
+
         return False, None
+    
+    def remaining_decode_tokens(self):
+        return self.max_new_tokens - self.current_tokens - 1
 
 class GenerationParameters(BaseModel):
     max_new_tokens: int = Field(default=20)
-    repetition_penalty: float = Field(default=1)
-    do_sample: bool = Field(default=False)
-    temperature: float = Field(default=1.0)
-    top_k: Optional[int] = Field(default=None)
-    top_p: Optional[float] = Field(default=None)
-    seed: int = Field(default=42)
+    # repetition_penalty: float = Field(default=1)
+    # do_sample: bool = Field(default=False)
+    # temperature: float = Field(default=1.0)
+    # top_k: Optional[int] = Field(default=None)
+    # top_p: Optional[float] = Field(default=None)
+    # seed: int = Field(default=42)
 
 class GenerateRequestInputs(BaseModel):
     inputs: str
@@ -115,7 +125,7 @@ class Request:
     id: int
     lora_id: str
     inputs: str
-    # generation_parameters: GenerationParameters
+    generation_parameters: GenerationParameters
 
 @dataclass
 class Batch:
@@ -133,10 +143,9 @@ class CachedBatch:
 @dataclass
 class Generation:
     request_id: int
-    token: Optional[str]
-    token_id: Optional[str]
+    token_id: Optional[int]
     stopped: bool
-    # finish_reason: FinishReason = None
+    finish_reason: FinishReason = None
 
 @dataclass
 class GenerateRequest:
