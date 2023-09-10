@@ -146,6 +146,7 @@ def load_loras(model, loras):
     # torch.nn.module throws error if lora name contains a dot
     adapters = [lora.replace(".", "_") for lora in loras]
     lora_map = {lora: adapter for lora, adapter in zip(loras, adapters)}
+    
     model = StreamingPeftModel.from_pretrained(
         model, loras[0], adapter_name=adapters[0]
     )
@@ -683,6 +684,7 @@ class StreamingPeftModel(PeftModel):
         stopping_criteria = self._get_stopping_criteria(
             generation_config=generation_config, stopping_criteria=stopping_criteria
         )
+
         # 10. go into different generation modes
         if is_assisted_gen_mode:
             if generation_config.num_return_sequences > 1:
@@ -1172,6 +1174,7 @@ class StreamingPeftModel(PeftModel):
         >>> tokenizer.batch_decode(outputs, skip_special_tokens=True)
         ["It might be possible to get a better understanding of the nature of the problem, but it's not"]
         ```"""
+
         # init values
         logits_processor = (
             logits_processor if logits_processor is not None else LogitsProcessorList()
@@ -1259,6 +1262,7 @@ class StreamingPeftModel(PeftModel):
         )
 
         this_peer_finished = False  # used by synced_gpus only
+        i = 0 
         while True:
             if synced_gpus:
                 # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
@@ -1272,8 +1276,17 @@ class StreamingPeftModel(PeftModel):
                 if this_peer_finished_flag.item() == 0.0:
                     break
 
-            # prepare model inputs
+            # # prepare model inputs
+            # if i == 0:
+            #     print(model_kwargs)
+            
+            # if i == 1:
+            #     print(model_kwargs.keys())
+            #     assert False
+            # i+=1    
+            
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            # print(model_inputs)
 
             # forward pass to get next token
             outputs = self(

@@ -113,8 +113,9 @@ class GenerateRequestOutputs(BaseModel):
 @dataclass
 class Request:
     id: int
+    lora_id: str
     inputs: str
-    generation_parameters: GenerationParameters
+    # generation_parameters: GenerationParameters
 
 @dataclass
 class Batch:
@@ -135,13 +136,13 @@ class Generation:
     token: Optional[str]
     token_id: Optional[str]
     stopped: bool
-    finish_reason: FinishReason = None
+    # finish_reason: FinishReason = None
 
 @dataclass
 class GenerateRequest:
     inputs: str
     generation_parameters: GenerationParameters
-    response_stream: Queue[Generation]
+    response_stream: "Queue[Generation]"
 
     @classmethod
     def from_gr_inputs(cls, gr_inputs: GenerateRequestInputs):
