@@ -107,9 +107,8 @@ class StoppingCriteria:
         return self.max_new_tokens - self.current_tokens - 1
 
 # TODO: convert to pydantic
-@dataclass
-class GenerateParameters:
-    max_new_tokens: int = 20
+class GenerateParameters(BaseModel):
+    max_new_tokens: int = Field(default=20)
     # repetition_penalty: float = Field(default=1)
     # do_sample: bool = Field(default=False)
     # temperature: float = Field(default=1.0)
@@ -118,17 +117,15 @@ class GenerateParameters:
     # seed: int = Field(default=42)
 
 # TODO: convert to pydantic
-@dataclass
-class GenerateRequestInputs:
+class GenerateRequestInputs(BaseModel):
     inputs: str
     lora_id: str
     generate_parameters: GenerateParameters
 
 # TODO: convert to pydantic
-@dataclass
-class GenerateRequestOutputs:
-    response_text: str = ""
-    finish_reason: Optional[FinishReason] = None
+class GenerateRequestOutputs(BaseModel):
+    response_text: str = Field(default="")
+    finish_reason: Optional[FinishReason] = Field(default=None)
 
 @dataclass
 class Request:

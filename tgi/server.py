@@ -5,14 +5,8 @@ from threading import Thread
 from router import TextGenerationRouter, batching_task
 from utils import GenerateRequestInputs, GenerateRequestOutputs, GenerateRequest
 
-import argparse
-parser = argparse.ArgumentParser()
-parser.add_argument("--base-model-id", type=str, required=True)
-parser.add_argument("--lora-ids", nargs='+', type=str, required=True)
-
-args = parser.parse_args()
-base_model_id = args.base_model_id
-lora_ids = args.lora_ids
+base_model_id = "decapoda-research/llama-7b-hf"
+lora_ids = ["jondurbin/airoboros-7b-gpt4-1.2-peft", "trl-lib/llama-7b-se-rl-peft", 'winddude/wizardLM-LlaMA-LoRA-7B']
 
 artifacts = {}
 
@@ -42,22 +36,24 @@ app = fastapi.FastAPI(lifespan=lifespan)
 
 @app.post("/generate")
 def generate(inputs: GenerateRequestInputs) -> GenerateRequestOutputs:
+
     # convert input to generate request
     generate_request = GenerateRequest.from_gr_inputs(inputs)
-    
+
     # submit request to the router
     artifacts["router"].submit_request(generate_request)
-    
-    gr_outputs = GenerateRequestOutputs()
 
     # build response
+    tokens = []
     generation = generate_request.response_stream.get()
     while not generation.stopped:
-        gr_outputs.response_text += generation.token
+        tokens.append(generation.token_id)
         generation = generate_request.response_stream.get()
 
-    gr_outputs.finish_reason = generation.finish_reason
-    return gr_outputs
+    return GenerateRequestOutputs(
+        response_text=artifacts["router"].service.model.tokenizer.decode(tokens),
+        finish_reason=generation.finish_reason
+    )
 
 if __name__ == "__main__":
     uvicorn.run(
