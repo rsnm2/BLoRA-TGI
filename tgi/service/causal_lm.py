@@ -1,4 +1,7 @@
-import torch, inspect
+import torch
+
+torch.set_default_tensor_type(torch.cuda.HalfTensor)
+
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase, LlamaTokenizer
@@ -63,7 +66,7 @@ class BLoraCausalLMBatch:
             lora_ids.append(r.lora_id)
             inputs.append(r.inputs)
             
-            max_new_tokens = r.generation_parameters.max_new_tokens
+            max_new_tokens = r.generate_parameters.max_new_tokens
             stopping_criterias.append(StoppingCriteria(
                 eos_token_id=tokenizer.eos_token_id,
                 max_new_tokens=max_new_tokens,

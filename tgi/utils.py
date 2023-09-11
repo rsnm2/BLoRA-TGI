@@ -6,6 +6,7 @@ from enum import Enum
 from typing import List, Optional, Tuple
 from logits_process import (RepetitionPenaltyLogitsProcessor, LogitsWarpers, softmax)
 
+# TODO: convert back to torch implementation
 # TODO: sample for b > 1 with vectorized code
 class Greedy:
     def __call__(self, logits: np.ndarray):
@@ -16,6 +17,7 @@ class Greedy:
         
         return np.argmax(logits[0,:])
 
+# TODO: convert back to torch implementation
 # TODO: sample for b > 1 with vectorized code
 # https://stackoverflow.com/questions/47722005/vectorizing-numpy-random-choice-for-given-2d-array-of-probabilities-along-an-a
 class Sampling:
@@ -31,6 +33,7 @@ class Sampling:
         probs = softmax(logits, axis=1)
         return self.generator.choice(probs.shape[1], p=probs[0,:])
 
+# TODO: convert back to torch implementation
 class NextTokenChooser:
     def __init__(
         self,
@@ -103,8 +106,10 @@ class StoppingCriteria:
     def remaining_decode_tokens(self):
         return self.max_new_tokens - self.current_tokens - 1
 
-class GenerationParameters(BaseModel):
-    max_new_tokens: int = Field(default=20)
+# TODO: convert to pydantic
+@dataclass
+class GenerateParameters:
+    max_new_tokens: int = 20
     # repetition_penalty: float = Field(default=1)
     # do_sample: bool = Field(default=False)
     # temperature: float = Field(default=1.0)
@@ -112,20 +117,25 @@ class GenerationParameters(BaseModel):
     # top_p: Optional[float] = Field(default=None)
     # seed: int = Field(default=42)
 
-class GenerateRequestInputs(BaseModel):
+# TODO: convert to pydantic
+@dataclass
+class GenerateRequestInputs:
     inputs: str
-    generation_parameters: GenerationParameters
+    lora_id: str
+    generate_parameters: GenerateParameters
 
-class GenerateRequestOutputs(BaseModel):
-    response_text: str = Field(default="")
-    finish_reason: Optional[FinishReason] = Field(default=None)
+# TODO: convert to pydantic
+@dataclass
+class GenerateRequestOutputs:
+    response_text: str = ""
+    finish_reason: Optional[FinishReason] = None
 
 @dataclass
 class Request:
     id: int
-    lora_id: str
     inputs: str
-    generation_parameters: GenerationParameters
+    lora_id: str
+    generate_parameters: GenerateParameters
 
 @dataclass
 class Batch:
@@ -150,13 +160,15 @@ class Generation:
 @dataclass
 class GenerateRequest:
     inputs: str
-    generation_parameters: GenerationParameters
+    lora_id: str
+    generate_parameters: GenerateParameters
     response_stream: "Queue[Generation]"
 
     @classmethod
     def from_gr_inputs(cls, gr_inputs: GenerateRequestInputs):
         return cls(
             inputs=gr_inputs.inputs,
-            generation_parameters=gr_inputs.generation_parameters,
+            lora_id=gr_inputs.lora_id,
+            generate_parameters=gr_inputs.generate_parameters,
             response_stream=Queue()
         )

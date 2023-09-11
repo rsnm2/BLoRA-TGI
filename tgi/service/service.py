@@ -9,7 +9,8 @@ class BatchCache:
 
     def pop(self, batch_id: int) -> BLoraCausalLMBatch:
         batch = self.cache.pop(batch_id, None)
-        assert batch is not None, "Batch ID {batch_id} not found in cache."
+        if batch is None:
+            raise ValueError(f"Batch ID {batch_id} not found in cache.")
         return batch
 
     def set(self, entry: BLoraCausalLMBatch):
@@ -59,13 +60,13 @@ class TextGenerationService:
         )
 
         generations, next_clm_batch = self.model.generate_token(clm_batch)
-        assert len(generations) == 1
         self.cache.set(next_clm_batch)
 
         return generations, (next_clm_batch.to_cached_batch() if next_clm_batch else None)
 
     def Decode(self, batches: List[CachedBatch]) -> Tuple[List[Generation], CachedBatch]:
-        assert len(batches) != 0, "Must provide at least one batch"
+        if len(batches) <= 0:
+            raise ValueError("Must pass at least one batch to service.Decode")
 
         clm_batches = []
         for cached_batch in batches:

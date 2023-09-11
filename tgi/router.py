@@ -1,26 +1,27 @@
 from queue import Queue
 from typing import List, Dict, Optional, Tuple
 from service.service import TextGenerationService
-from utils import CachedBatch, Batch, Generation, GenerateRequest, Request, GenerationParameters
+from utils import CachedBatch, Batch, Generation, GenerateRequest, Request, GenerateParameters
 
 class TextGenerationRouter:
     def __init__(
         self, 
-        service: Optional[TextGenerationService] = None,
-        base_model_id: Optional[str] = None,
-        lora_ids: List[str] = []
+        base_model_id: str,
+        lora_ids: List[str]
     ):        
-        assert service is not None or (base_model_id is not None and len(lora_ids) == 0)
+        if len(lora_ids) <= 0:
+            raise ValueError("Must pass at least one lora id")
 
-        if service is not None:
-            self.service = service
-        else:
-            self.service = TextGenerationService(
-                base_model_id=base_model_id,
-                lora_ids=lora_ids,
-            )
+        # create service
+        self.service = TextGenerationService(
+            base_model_id=base_model_id,
+            lora_ids=lora_ids,
+        )
 
+        # create queue
         self.queue: RequestQueue = RequestQueue()
+        
+        # state to break out to batching task for loop
         self.batching_task_should_stop: bool = False
 
     def submit_request(self, generate_request: GenerateRequest):
@@ -33,7 +34,8 @@ class TextGenerationRouter:
         # unblock the batching task with a dummy request if blocked
         self.queue.append(GenerateRequest(
             inputs="stop",
-            generation_parameters=GenerationParameters(max_new_tokens=1),
+            lora_id=list(self.service.model.lora_map.keys())[0],
+            generate_parameters=GenerateParameters(max_new_tokens=1),
             response_stream=Queue()
         ))
 
@@ -43,8 +45,8 @@ class TextGenerationRouter:
         generate_requests: Dict[int, GenerateRequest]
     ) -> Optional[CachedBatch]:
         
-        generation, next_batch = self.service.Prefill(batch=batch)
-        active_generate_request_ids = self.filter_send_generations([generation], generate_requests)
+        generations, next_batch = self.service.Prefill(batch=batch)
+        active_generate_request_ids = self.filter_send_generations(generations, generate_requests)
         return self.filter_batch(batch=next_batch, active_generate_request_ids=active_generate_request_ids)
 
     def decode(
@@ -170,8 +172,9 @@ class RequestQueue:
         # format into request
         request = Request(
             id=self.next_request_id,
+            lora_id=generate_request.lora_id,
             inputs=generate_request.inputs,
-            generation_parameters=generate_request.generation_parameters,
+            generate_parameters=generate_request.generate_parameters,
         )
         self.next_request_id += 1
         
