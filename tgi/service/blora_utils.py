@@ -1708,7 +1708,11 @@ class BLoraModel(LoraModel):
                     f"Target module {target} is not supported. "
                     f"Currently, only `torch.nn.Linear` and `Conv1D` are supported."
                 )
-            new_module = BLinear(
+            
+            # new_module = BLinear(
+            #     adapter_name, in_features, out_features, bias=bias, **kwargs
+            # )
+            new_module = BLinearTimed(
                 adapter_name, in_features, out_features, bias=bias, **kwargs
             )
 
@@ -1753,4 +1757,64 @@ class BLinear(Linear):
             )
 
         result = result.to(previous_dtype)
+        return result
+    
+import time
+class BLinearTimed(Linear):
+    def forward(self, x: torch.Tensor):
+
+        if hasattr(self, "get_example") and self.get_example:
+            self.x_example = x
+    
+        previous_dtype = x.dtype
+        if self.active_adapter not in self.lora_A.keys():
+            return F.linear(
+                x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
+            )
+        if self.disable_adapters:
+            if self.r[self.active_adapter] > 0 and self.merged:
+                self.unmerge()
+            result = F.linear(
+                x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
+            )
+        elif self.r[self.active_adapter] > 0 and not self.merged:
+            
+            start = time.perf_counter()
+            
+            result = F.linear(
+                x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
+            )
+
+            end = time.perf_counter()
+            linear_time = end - start
+
+            start = time.perf_counter()
+
+            x = x.to(self.lora_A[self.active_adapter].weight.dtype)
+
+            batch = list(zip(x, self.batch_lora_ids))
+
+            # rewrite as for loop
+            lora_out = torch.zeros_like(result)
+            for i, (x, lora_id) in enumerate(batch):
+                if lora_id in self.lora_A.keys():
+                    lora_out[i] = self.scaling[lora_id] * self.lora_B[lora_id](
+                        self.lora_A[lora_id](self.lora_dropout[lora_id](x))
+                    )
+
+            result += lora_out
+
+            end = time.perf_counter()
+            lora_time = end - start
+
+        else:
+            result = F.linear(
+                x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
+            )
+
+        result = result.to(previous_dtype)
+
+        if hasattr(self, "report_timing") and self.report_timing:            
+            return linear_time, lora_time
+
         return result
