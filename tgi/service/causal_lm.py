@@ -452,8 +452,10 @@ class BLoraCausalLM:
         lora_ids: List[str],
         has_position_ids: bool = True,
         dtype: torch.dtype = torch.float16,
+        blinear_type: Optional[str] = None,
     ):
         self.active_batch_id = None
+        self.blinear_type = blinear_type
         
         self.model = AutoModelForCausalLM.from_pretrained(
             base_model_id,
@@ -461,7 +463,7 @@ class BLoraCausalLM:
             torch_dtype=dtype
         )
 
-        self.model, self.lora_map = load_loras(self.model, lora_ids)
+        self.model, self.lora_map = load_loras(self.model, lora_ids, blinear_type=blinear_type)
         self.has_position_ids = has_position_ids
 
         # self.tokenizer = AutoTokenizer.from_pretrained(base_model_id)
@@ -495,7 +497,11 @@ class BLoraCausalLM:
             # TODO (@rsnm2): figure out if this take a long time and make it faster
             inp_loras = [self.lora_map[lora_id] for lora_id in batch_lora_ids]
             for _, module in self.model.named_modules():
-                module.batch_lora_ids = inp_loras
+                if self.blinear_type == "bmm":
+                    if hasattr(module, "set_batch_lora_ids"):
+                        module.set_batch_lora_ids(inp_loras)
+                else:
+                    module.batch_lora_ids = inp_loras
 
     def forward(
         self,
