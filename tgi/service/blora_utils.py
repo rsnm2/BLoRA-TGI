@@ -142,17 +142,17 @@ PEFT_TYPE_TO_MODEL_MAPPING = {
 logger = logging.get_logger(__name__)
 
 
-def load_loras(model, loras):
+def load_loras(model, loras, blinear_type=None):
     # torch.nn.module throws error if lora name contains a dot
     adapters = [lora.replace(".", "_") for lora in loras]
     lora_map = {lora: adapter for lora, adapter in zip(loras, adapters)}
     
     model = StreamingPeftModel.from_pretrained(
-        model, loras[0], adapter_name=adapters[0]
+        model, loras[0], adapter_name=adapters[0], blinear_type=blinear_type
     )
     for lora, adapter in zip(loras[1:], adapters[1:]):
         model = StreamingPeftModel.from_pretrained(
-            model.base_model.model, lora, adapter_name=adapter
+            model.base_model.model, lora, adapter_name=adapter, blinear_type=blinear_type
         )
     return model, lora_map
 
@@ -210,6 +210,7 @@ class StreamingPeftModel(PeftModel):
         model: PreTrainedModel,
         peft_config: PeftConfig,
         adapter_name: str = "default",
+        blinear_type: Optional[str] = None
     ):
         # call super init on both PushToHubMixin, torch.nn.Module
         PushToHubMixin.__init__(self)
@@ -223,7 +224,7 @@ class StreamingPeftModel(PeftModel):
         if not isinstance(peft_config, PromptLearningConfig):
             self.peft_config[adapter_name] = peft_config
             self.base_model = BLoraModel(
-                self.base_model, self.peft_config, adapter_name
+                self.base_model, self.peft_config, adapter_name, blinear_type=blinear_type
             )
             self.set_additional_trainable_modules(peft_config, adapter_name)
         else:
@@ -240,6 +241,7 @@ class StreamingPeftModel(PeftModel):
         adapter_name: str = "default",
         is_trainable: bool = False,
         config: Optional[PeftConfig] = None,
+        blinear_type: Optional[str] = None,
         **kwargs: Any,
     ):
         r"""
@@ -305,7 +307,7 @@ class StreamingPeftModel(PeftModel):
         if config.task_type not in MODEL_TYPE_TO_PEFT_MODEL_MAPPING.keys():
             model = cls(model, config, adapter_name)
         else:
-            model = StreamingPeftModel(model, config, adapter_name)
+            model = StreamingPeftModel(model, config, adapter_name, blinear_type=blinear_type)
         model.load_adapter(model_id, adapter_name, is_trainable=is_trainable, **kwargs)
         return model
 
@@ -1533,18 +1535,18 @@ class StreamingPeftModel(PeftModel):
 
 
 class BLoraModel(LoraModel):
-    def __init__(self, model, config, adapter_name):
+    def __init__(self, model, config, adapter_name, blinear_type=None):
         torch.nn.Module.__init__(self)
         self.model = model
         self.forward = self.model.forward
         self.peft_config = config
-        self.add_adapter(adapter_name, self.peft_config[adapter_name])
+        self.add_adapter(adapter_name, self.peft_config[adapter_name], blinear_type=blinear_type)
 
         # transformers models have a .config attribute, whose presence is assumed later on
         if not hasattr(self, "config"):
             self.config = {"model_type": "custom"}
 
-    def add_adapter(self, adapter_name, config=None):
+    def add_adapter(self, adapter_name, config=None, blinear_type=None):
         if config is not None:
             model_config = getattr(self.model, "config", {"model_type": "custom"})
             if hasattr(model_config, "to_dict"):
@@ -1552,7 +1554,7 @@ class BLoraModel(LoraModel):
 
             config = self._prepare_lora_config(config, model_config)
             self.peft_config[adapter_name] = config
-        self._find_and_replace(adapter_name)
+        self._find_and_replace(adapter_name, blinear_type=blinear_type)
         if len(self.peft_config) > 1 and self.peft_config[adapter_name].bias != "none":
             raise ValueError(
                 "LoraModel supports only 1 adapter with bias. When using multiple adapters, set bias to 'none' for all adapters."
@@ -1561,7 +1563,7 @@ class BLoraModel(LoraModel):
         if self.peft_config[adapter_name].inference_mode:
             _freeze_adapter(self.model, adapter_name)
 
-    def _find_and_replace(self, adapter_name):
+    def _find_and_replace(self, adapter_name, blinear_type=None):
         lora_config = self.peft_config[adapter_name]
         self._check_quantization_dependency()
         is_target_modules_in_base_model = False
@@ -1602,7 +1604,7 @@ class BLoraModel(LoraModel):
                     lora_config.init_lora_weights,
                 )
             else:
-                new_module = self._create_new_module(lora_config, adapter_name, target)
+                new_module = self._create_new_module(lora_config, adapter_name, target, blinear_type=blinear_type)
                 self._replace_module(parent, target_name, new_module, target)
 
         if not is_target_modules_in_base_model:
@@ -1611,7 +1613,7 @@ class BLoraModel(LoraModel):
                 f"Please check the target modules and try again."
             )
 
-    def _create_new_module(self, lora_config, adapter_name, target):
+    def _create_new_module(self, lora_config, adapter_name, target, blinear_type=None):
         bias = hasattr(target, "bias") and target.bias is not None
         kwargs = {
             "r": lora_config.r,
@@ -1709,15 +1711,22 @@ class BLoraModel(LoraModel):
                     f"Currently, only `torch.nn.Linear` and `Conv1D` are supported."
                 )
             
-            # new_module = BLinear(
-            #     adapter_name, in_features, out_features, bias=bias, **kwargs
-            # )
-            new_module = BLinearTimed(
-                adapter_name, in_features, out_features, bias=bias, **kwargs
-            )
+            if blinear_type is None or blinear_type == "original":
+                new_module = BLinear(
+                    adapter_name, in_features, out_features, bias=bias, **kwargs
+                )
+            elif blinear_type == "timed":
+                new_module = BLinearTimed(
+                    adapter_name, in_features, out_features, bias=bias, **kwargs
+                )
+            elif blinear_type == "bmm":
+                new_module = BLinearBMM(
+                    adapter_name, in_features, out_features, bias=bias, **kwargs
+                )
+            else:
+                raise ValueError(f"Invalid blinear_type of {blinear_type}")
 
         return new_module
-
 
 class BLinear(Linear):
     def forward(self, x: torch.Tensor):
@@ -1758,7 +1767,7 @@ class BLinear(Linear):
 
         result = result.to(previous_dtype)
         return result
-    
+
 import time
 class BLinearTimed(Linear):
     def forward(self, x: torch.Tensor):
@@ -1817,4 +1826,89 @@ class BLinearTimed(Linear):
         if hasattr(self, "report_timing") and self.report_timing:            
             return linear_time, lora_time
 
+        return result
+    
+# reframes blora as BMM + scatter_add - layer runs about 30x faster at b=100 w/ 7b parameter model
+# sacrifies:
+#       -- no support for dropout right now -- 
+#               - could adjust in the future with bucketing (commonly p=0.05)
+#
+#       -- requres each lora adapter to have the same rank -- 
+#               - hanlde by bucketing given restricted set of r's (commonly 16 or 64)
+#
+#       -- requires b copies of the LORA weights --
+#               - do we care about this? at high batch sizes, weights dont matter for memory
+#                   - if r=64, then 64/4096 = ~1.5%; so b=100 means we ~2x the weights; but kvs dominate at this b size
+#
+#               - bad for case with few loras, big batch (but is this a rare case for my server?)
+#                   - could handle this by doing a pytorch loop through a few loras with broadcasted
+#
+#               - a custom kernel could handle this perfectly (i.e. some way to broadcast inside bmm)
+#                   - e.g. some broadcast_bmm(idxs, X, W) where idxs tells you which indexes maps idxs of W to X
+
+class BLinearBMM(Linear):
+    # called by model code when batch needs to be updated
+    # todo: update to handle incremental garbage collections like the KV caches
+    def set_batch_lora_ids(self, lora_ids: List[str]):
+
+        # get ids of the lora adapters active in this layer
+        self.batch_lora_ids = [lora_id for lora_id in lora_ids if lora_id in self.lora_A.keys()]
+        self.lora_batch_size = len(self.batch_lora_ids)
+
+        # metadata for scatters needed if lora_batch_size < x.batch_size
+        self.x_index = [idx for idx, lora_id in enumerate(lora_ids) if lora_id in self.lora_A.keys()]
+        self.scatter_index = torch.tensor(self.x_index).view(-1,1,1).to(self.weight.device)
+
+        # confirm all the loras have same dtype and rank
+        r = None
+        for lora_id in self.batch_lora_ids:
+            if r is None:
+                r = self.r[lora_id]
+            else:
+                assert r == self.r[lora_id]
+            assert self.lora_A[lora_id].weight.dtype == self.weight.dtype
+
+        # create the tensors [lora_b, W]
+        self.lora_A_weights = torch.stack([self.lora_A[lora_id].weight.T for lora_id in self.batch_lora_ids]).to(self.weight.device)
+        self.lora_B_weights = torch.stack([self.lora_B[lora_id].weight.T for lora_id in self.batch_lora_ids]).to(self.weight.device)
+        self.scales = torch.tensor([self.scaling[lora_id] for lora_id in self.batch_lora_ids]).reshape(-1,1,1).to(self.weight.device)
+
+    def forward(self, x: torch.Tensor):
+        previous_dtype = x.dtype
+
+        if self.training:
+            raise ValueError("BLinearBMM only supports forward pass")
+
+        if not hasattr(self, "lora_A_weights"):
+            raise ValueError("Calling forward before we have set the current batch lora ids")
+
+        if self.active_adapter not in self.lora_A.keys():
+            raise NotImplementedError
+
+        if self.disable_adapters:
+            raise NotImplementedError
+        
+        elif self.r[self.active_adapter] > 0 and not self.merged:
+            # xW forward
+            result = F.linear(x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias)
+
+            # xAB LORA forward (note: should add dropout here to support training)
+            #   -- if all lora_adapters active, just add lora result to result
+            #   -- else, only run on thr active adapters, scatter_add lora result
+            if x.shape[0] == self.lora_batch_size:
+                result += torch.bmm(torch.bmm(x, self.lora_A_weights), self.lora_B_weights) * self.scales
+            else:
+                lora_result = torch.bmm(torch.bmm(x[self.x_index,:,:], self.lora_A_weights), self.lora_B_weights) * self.scales
+                result.scatter_add_(
+                    dim=0, 
+                    index=self.scatter_index.expand(lora_result.shape), 
+                    src=lora_result
+                )
+
+        else:
+            result = F.linear(
+                x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
+            )
+
+        result = result.to(previous_dtype)
         return result
