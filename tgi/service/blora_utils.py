@@ -1855,6 +1855,14 @@ class BLinearBMM(Linear):
         self.batch_lora_ids = [lora_id for lora_id in lora_ids if lora_id in self.lora_A.keys()]
         self.lora_batch_size = len(self.batch_lora_ids)
 
+        if self.lora_batch_size == 0:
+            self.x_index = None
+            self.scatter_index = None
+            self.lora_A_weights = None
+            self.lora_B_weights = None
+            self.scales = None
+            return
+
         # metadata for scatters needed if lora_batch_size < x.batch_size
         self.x_index = [idx for idx, lora_id in enumerate(lora_ids) if lora_id in self.lora_A.keys()]
         self.scatter_index = torch.tensor(self.x_index).view(-1,1,1).to(self.weight.device)
@@ -1869,6 +1877,7 @@ class BLinearBMM(Linear):
             assert self.lora_A[lora_id].weight.dtype == self.weight.dtype
 
         # create the tensors [lora_b, W]
+        
         self.lora_A_weights = torch.stack([self.lora_A[lora_id].weight.T for lora_id in self.batch_lora_ids]).to(self.weight.device)
         self.lora_B_weights = torch.stack([self.lora_B[lora_id].weight.T for lora_id in self.batch_lora_ids]).to(self.weight.device)
         self.scales = torch.tensor([self.scaling[lora_id] for lora_id in self.batch_lora_ids]).reshape(-1,1,1).to(self.weight.device)
@@ -1895,7 +1904,9 @@ class BLinearBMM(Linear):
             # xAB LORA forward (note: should add dropout here to support training)
             #   -- if all lora_adapters active, just add lora result to result
             #   -- else, only run on thr active adapters, scatter_add lora result
-            if x.shape[0] == self.lora_batch_size:
+            if self.lora_batch_size == 0:
+                pass
+            elif x.shape[0] == self.lora_batch_size:
                 result += torch.bmm(torch.bmm(x, self.lora_A_weights), self.lora_B_weights) * self.scales
             else:
                 lora_result = torch.bmm(torch.bmm(x[self.x_index,:,:], self.lora_A_weights), self.lora_B_weights) * self.scales
